@@ -1,0 +1,35 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #e7e5df;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+#root {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* On phone-sized viewports, let the app fill the whole screen edge-to-edge
+   instead of showing as a centered "card" preview. */
+@media (max-width: 480px) {
+  body {
+    background: #ffffff;
+  }
+  .punch-root {
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    max-width: 100% !important;
+    min-height: 100dvh !important;
+    margin: 0 !important;
+  }
+}
