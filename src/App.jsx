@@ -15,6 +15,8 @@ import {
   Pencil,
   Trash2,
   ClipboardList,
+  Download,
+  Upload,
 } from "lucide-react";
 
 /* ----------------------------------------------------------------------- */
@@ -37,6 +39,10 @@ const LIGHT = {
   warningSoft: "#FBEEDC",
   danger: "#D34B41",
   dangerSoft: "#FBE7E4",
+  sick: "#C4457A",
+  sickSoft: "#FBE7EF",
+  vacation: "#6C4FD1",
+  vacationSoft: "#EDE8FB",
   shadow: "0 1px 2px rgba(20,20,25,0.04), 0 8px 24px -12px rgba(20,20,25,0.12)",
 };
 
@@ -56,6 +62,10 @@ const DARK = {
   warningSoft: "#392A11",
   danger: "#EB7A70",
   dangerSoft: "#3A1917",
+  sick: "#E888B2",
+  sickSoft: "#3A1E29",
+  vacation: "#A98CF0",
+  vacationSoft: "#2A2140",
   shadow: "0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5)",
 };
 
@@ -156,7 +166,7 @@ function fmtMonthDay(key) {
 const STORAGE_KEY = "punch-app-data-v1";
 
 const DEFAULT_DATA = {
-  settings: { requiredMinutes: 480, breakMinutes: 60 },
+  settings: { requiredMinutes: 480, breakMinutes: 0 },
   schedule: {
     0: { isDayOff: true },
     1: { isDayOff: false, start: "08:00", end: "17:00" },
@@ -169,6 +179,7 @@ const DEFAULT_DATA = {
   overrides: {},
   attendance: {},
   workLogs: {},
+  leaves: {},
 };
 
 function mergeWithDefaults(saved) {
@@ -179,6 +190,7 @@ function mergeWithDefaults(saved) {
     overrides: saved.overrides || {},
     attendance: saved.attendance || {},
     workLogs: saved.workLogs || {},
+    leaves: saved.leaves || {},
   };
 }
 
@@ -205,11 +217,17 @@ function getScheduleFor(data, key) {
   };
 }
 
+const LEAVE_LABELS = { sick: "Sick leave", vacation: "Vacation leave" };
+
 function getCellInfo(data, key, todayKey) {
+  const leave = data.leaves[key];
   const sched = getScheduleFor(data, key);
   const att = data.attendance[key];
   const hasLog = !!data.workLogs[key];
 
+  if (leave) {
+    return { type: "leave", leaveType: leave.type };
+  }
   if (att && att.timeIn && att.timeOut) {
     return {
       type: "completed",
@@ -243,8 +261,11 @@ function summarizeCutoff(data, year, monthIndex, cutoff) {
     daysWorked = 0,
     totalMinutes = 0,
     overtimeMinutes = 0,
-    requiredMinutes = 0;
+    requiredMinutes = 0,
+    sickDays = 0,
+    vacationDays = 0;
   const records = [];
+  const leaveRecords = [];
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
     const key = dateKey(d);
     const sched = getScheduleFor(data, key);
@@ -252,6 +273,12 @@ function summarizeCutoff(data, year, monthIndex, cutoff) {
     else {
       workingDays++;
       requiredMinutes += data.settings.requiredMinutes;
+    }
+    const leave = data.leaves[key];
+    if (leave) {
+      if (leave.type === "sick") sickDays++;
+      else if (leave.type === "vacation") vacationDays++;
+      leaveRecords.push({ key, type: leave.type });
     }
     const att = data.attendance[key];
     if (att && att.timeIn && att.timeOut) {
@@ -264,6 +291,7 @@ function summarizeCutoff(data, year, monthIndex, cutoff) {
     }
   }
   records.sort((a, b) => (a.key < b.key ? 1 : -1));
+  leaveRecords.sort((a, b) => (a.key < b.key ? 1 : -1));
   return {
     workingDays,
     daysOff,
@@ -271,9 +299,12 @@ function summarizeCutoff(data, year, monthIndex, cutoff) {
     totalMinutes,
     overtimeMinutes,
     requiredMinutes,
+    sickDays,
+    vacationDays,
     start,
     end,
     records,
+    leaveRecords,
   };
 }
 
@@ -431,6 +462,10 @@ export default function PunchApp() {
   }
 
   const handleTimeIn = (key) => {
+    if (data.leaves[key]) {
+      setToast({ text: "This date is marked as leave — remove it first to clock in.", tone: "danger" });
+      return;
+    }
     const existing = data.attendance[key];
     if (existing && existing.timeIn) return;
     const timeStr = nowTimeString();
@@ -465,16 +500,29 @@ export default function PunchApp() {
     if (override === null) delete newOverrides[key];
     else newOverrides[key] = override;
     const nextData = { ...data, overrides: newOverrides };
-    let newAttendance = data.attendance;
-    if (data.attendance[key]) {
+    let newAttendance = { ...data.attendance };
+    if (override && override.isDayOff) {
+      // Day off: any existing clock times for this date no longer apply.
+      delete newAttendance[key];
+    } else if (data.attendance[key]) {
       const sched = getScheduleFor(nextData, key);
-      newAttendance = {
-        ...data.attendance,
-        [key]: recalc(data.attendance[key], sched.breakMinutes, data.settings.requiredMinutes),
-      };
+      newAttendance[key] = recalc(data.attendance[key], sched.breakMinutes, data.settings.requiredMinutes);
     }
     persist({ ...nextData, attendance: newAttendance });
     setToast({ text: override ? "Schedule set for this date" : "Reset to default schedule", tone: "success" });
+  };
+
+  const handleSetLeave = (key, type) => {
+    const newLeaves = { ...data.leaves };
+    if (type === null) delete newLeaves[key];
+    else newLeaves[key] = { type };
+    const newAttendance = { ...data.attendance };
+    if (type) delete newAttendance[key]; // on leave: clear any clock times for this date
+    persist({ ...data, leaves: newLeaves, attendance: newAttendance });
+    setToast({
+      text: type ? `Marked as ${LEAVE_LABELS[type].toLowerCase()}` : "Leave removed",
+      tone: "success",
+    });
   };
 
   const handleSaveWorkLog = (key, log) => {
@@ -494,6 +542,12 @@ export default function PunchApp() {
     });
     persist({ ...data, settings, schedule, attendance: newAttendance });
     setToast({ text: "Schedule updated", tone: "success" });
+  };
+
+  const handleImportData = (importedRaw) => {
+    const merged = mergeWithDefaults(importedRaw);
+    persist(merged);
+    setToast({ text: "Backup imported", tone: "success" });
   };
 
   /* ---- missing timeout lookup ---- */
@@ -554,7 +608,7 @@ export default function PunchApp() {
       {/* ---------------- HEADER ---------------- */}
       <div
         style={{
-          padding: "40px 20px 14px",
+          padding: "18px 20px 14px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -657,7 +711,7 @@ export default function PunchApp() {
           />
         )}
         {tab === "settings" && (
-          <SettingsTab T={T} data={data} onSave={handleSaveSettings} />
+          <SettingsTab T={T} data={data} onSave={handleSaveSettings} onImport={handleImportData} />
         )}
       </div>
 
@@ -768,6 +822,7 @@ export default function PunchApp() {
           onTimeOut={() => handleTimeOut(sheetKey)}
           onManualEdit={(ti, to) => handleManualEdit(sheetKey, ti, to)}
           onSetOverride={(override) => handleSetOverride(sheetKey, override)}
+          onSetLeave={(type) => handleSetLeave(sheetKey, type)}
           onOpenWorkLog={() => {
             setWorkLogKey(sheetKey);
           }}
@@ -923,6 +978,25 @@ function DayCell({ T, day, info, isToday, onClick }) {
         </span>
       </div>
     );
+  } else if (info.type === "leave") {
+    const leaveColor = info.leaveType === "sick" ? T.sick : T.vacation;
+    const leaveBg = info.leaveType === "sick" ? T.sickSoft : T.vacationSoft;
+    barColor = leaveColor;
+    content = (
+      <span
+        style={{
+          fontSize: 8.5,
+          fontWeight: 800,
+          color: leaveColor,
+          background: leaveBg,
+          borderRadius: 5,
+          padding: "1px 4px",
+          letterSpacing: 0.3,
+        }}
+      >
+        {info.leaveType === "sick" ? "SICK" : "VAC"}
+      </span>
+    );
   }
 
   return (
@@ -963,6 +1037,8 @@ function Legend({ T }) {
     { c: T.warning, l: "Overtime / in progress" },
     { c: T.danger, l: "Missing time out" },
     { c: T.faint, l: "Day off" },
+    { c: T.sick, l: "Sick leave" },
+    { c: T.vacation, l: "Vacation leave" },
   ];
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 16, padding: "10px 12px", background: T.surfaceAlt, borderRadius: 12 }}>
@@ -985,6 +1061,7 @@ function TodayTab({ T, data, todayKey, onTimeIn, onTimeOut, onViewLog, onOpenShe
   const sched = getScheduleFor(data, todayKey);
   const att = data.attendance[todayKey];
   const hasLog = !!data.workLogs[todayKey];
+  const leave = data.leaves[todayKey] || null;
 
   let elapsed = null;
   if (att && att.timeIn && !att.timeOut) {
@@ -1012,61 +1089,76 @@ function TodayTab({ T, data, todayKey, onTimeIn, onTimeOut, onViewLog, onOpenShe
         }}
       >
         <div style={{ fontSize: 11, fontWeight: 700, color: T.muted, letterSpacing: 0.4, marginBottom: 4 }}>
-          {sched.isDayOff ? "DAY OFF" : "TODAY'S SCHEDULE"}
+          {leave ? LEAVE_LABELS[leave.type].toUpperCase() : sched.isDayOff ? "DAY OFF" : "TODAY'S SCHEDULE"}
         </div>
-        {!sched.isDayOff && (
+        {!sched.isDayOff && !leave && (
           <div style={{ fontFamily: MONO, fontSize: 15, fontWeight: 600, color: T.ink, marginBottom: 18 }}>
             {fmtClock(sched.start)} – {fmtClock(sched.end)}
           </div>
         )}
-        {sched.isDayOff && <div style={{ height: 14 }} />}
+        {(sched.isDayOff || leave) && <div style={{ height: 14 }} />}
 
-        {!att?.timeIn && (
+        {leave ? (
+          <div
+            style={{
+              fontSize: 13,
+              color: leave.type === "sick" ? T.sick : T.vacation,
+              fontWeight: 600,
+              padding: "4px 0 4px",
+            }}
+          >
+            No time tracking today — you're marked as {LEAVE_LABELS[leave.type].toLowerCase()}.
+          </div>
+        ) : (
           <>
-            <div style={{ fontSize: 13, color: T.muted, marginBottom: 16 }}>You haven't clocked in yet.</div>
-            <BigButton bg={T.primary} fg="#fff" onClick={onTimeIn}>
-              Time in
-            </BigButton>
-          </>
-        )}
+            {!att?.timeIn && (
+              <>
+                <div style={{ fontSize: 13, color: T.muted, marginBottom: 16 }}>You haven't clocked in yet.</div>
+                <BigButton bg={T.primary} fg="#fff" onClick={onTimeIn}>
+                  Time in
+                </BigButton>
+              </>
+            )}
 
-        {att?.timeIn && !att?.timeOut && (
-          <>
-            <div style={{ fontFamily: MONO, fontSize: 36, fontWeight: 800, letterSpacing: -1, marginBottom: 2 }}>
-              {fmtClock(att.timeIn)}
-            </div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.warning, letterSpacing: 0.3, marginBottom: 14 }}>
-              TIME IN · CLOCKED IN
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 18 }}>
-              <Stat T={T} label="Elapsed" value={fmtDuration(elapsed)} />
-              <Stat T={T} label="Scheduled end" value={sched.end ? fmtClock(sched.end) : "––"} />
-            </div>
-            <BigButton bg={T.warning} fg="#fff" onClick={onTimeOut}>
-              Time out
-            </BigButton>
-          </>
-        )}
+            {att?.timeIn && !att?.timeOut && (
+              <>
+                <div style={{ fontFamily: MONO, fontSize: 36, fontWeight: 800, letterSpacing: -1, marginBottom: 2 }}>
+                  {fmtClock(att.timeIn)}
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.warning, letterSpacing: 0.3, marginBottom: 14 }}>
+                  TIME IN · CLOCKED IN
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 18 }}>
+                  <Stat T={T} label="Elapsed" value={fmtDuration(elapsed)} />
+                  <Stat T={T} label="Scheduled end" value={sched.end ? fmtClock(sched.end) : "––"} />
+                </div>
+                <BigButton bg={T.warning} fg="#fff" onClick={onTimeOut}>
+                  Time out
+                </BigButton>
+              </>
+            )}
 
-        {att?.timeIn && att?.timeOut && (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 14 }}>
-              <Stat T={T} label="Time in" value={fmtClock(att.timeIn)} mono />
-              <Stat T={T} label="Time out" value={fmtClock(att.timeOut)} mono />
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 18 }}>
-              <Stat T={T} label="Worked" value={fmtDuration(att.workedMinutes)} big />
-              <Stat
-                T={T}
-                label="Overtime"
-                value={fmtDuration(att.overtimeMinutes)}
-                big
-                color={att.overtimeMinutes > 0 ? T.warning : T.success}
-              />
-            </div>
-            <BigButton bg={T.surfaceAlt} fg={T.ink} onClick={onViewLog} style={{ border: `1px solid ${T.border}` }}>
-              {hasLog ? "View work log" : "Add work log"}
-            </BigButton>
+            {att?.timeIn && att?.timeOut && (
+              <>
+                <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 14 }}>
+                  <Stat T={T} label="Time in" value={fmtClock(att.timeIn)} mono />
+                  <Stat T={T} label="Time out" value={fmtClock(att.timeOut)} mono />
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 18 }}>
+                  <Stat T={T} label="Worked" value={fmtDuration(att.workedMinutes)} big />
+                  <Stat
+                    T={T}
+                    label="Overtime"
+                    value={fmtDuration(att.overtimeMinutes)}
+                    big
+                    color={att.overtimeMinutes > 0 ? T.warning : T.success}
+                  />
+                </div>
+                <BigButton bg={T.surfaceAlt} fg={T.ink} onClick={onViewLog} style={{ border: `1px solid ${T.border}` }}>
+                  {hasLog ? "View work log" : "Add work log"}
+                </BigButton>
+              </>
+            )}
           </>
         )}
       </div>
@@ -1181,8 +1273,48 @@ function RecordsTab({ T, data, viewDate, setViewDate, cutoff, setCutoff, todayKe
             value={fmtDuration(summary.overtimeMinutes)}
             color={summary.overtimeMinutes > 0 ? T.warning : T.success}
           />
+          <SummaryStat T={T} label="Sick leave" value={`${summary.sickDays} day${summary.sickDays === 1 ? "" : "s"}`} color={summary.sickDays > 0 ? T.sick : undefined} />
+          <SummaryStat T={T} label="Vacation leave" value={`${summary.vacationDays} day${summary.vacationDays === 1 ? "" : "s"}`} color={summary.vacationDays > 0 ? T.vacation : undefined} />
         </div>
       </div>
+
+      {/* Leave list */}
+      {summary.leaveRecords.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, letterSpacing: 0.5, marginBottom: 8 }}>LEAVE</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {summary.leaveRecords.map((lr) => {
+              const ld = parseDateKey(lr.key);
+              const color = lr.type === "sick" ? T.sick : T.vacation;
+              const soft = lr.type === "sick" ? T.sickSoft : T.vacationSoft;
+              return (
+                <button
+                  key={lr.key}
+                  onClick={() => onSelectDate(lr.key)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    background: T.surface,
+                    border: `1px solid ${T.border}`,
+                    borderRadius: 12,
+                    padding: "10px 14px",
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>
+                    {MONTH_LABELS[ld.getMonth()].slice(0, 3)} {ld.getDate()} · {WEEKDAY_FULL[jsDow(ld)].slice(0, 3)}
+                  </span>
+                  <Pill bg={soft} fg={color}>
+                    {LEAVE_LABELS[lr.type]}
+                  </Pill>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Records list */}
       {summary.records.length === 0 && (
@@ -1266,10 +1398,12 @@ function SummaryStat({ T, label, value, color }) {
 /* DATE DETAILS BOTTOM SHEET                                                */
 /* ----------------------------------------------------------------------- */
 
-function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut, onManualEdit, onSetOverride, onOpenWorkLog }) {
+function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut, onManualEdit, onSetOverride, onSetLeave, onOpenWorkLog }) {
   const d = parseDateKey(dateKeyStr);
   const sched = getScheduleFor(data, dateKeyStr);
   const att = data.attendance[dateKeyStr] || {};
+  const leave = data.leaves[dateKeyStr] || null;
+  const isLeave = !!leave;
   const hasLog = !!data.workLogs[dateKeyStr];
   const [editMode, setEditMode] = useState(false);
   const [ti, setTi] = useState(att.timeIn || "");
@@ -1295,6 +1429,7 @@ function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut
   const overtime = worked !== null ? Math.max(0, worked - data.settings.requiredMinutes) : null;
 
   const isMissingTimeout = att.timeIn && !att.timeOut && dateKeyStr !== todayKey;
+  const noTimeTracking = sched.isDayOff || isLeave;
 
   return (
     <div
@@ -1328,7 +1463,7 @@ function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut
         </div>
 
         {!schedEditMode ? (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
             <div style={{ fontSize: 12.5, color: T.muted }}>
               {sched.isDayOff ? (
                 <span>Day off{sched.note ? ` — ${sched.note}` : ""}</span>
@@ -1349,7 +1484,7 @@ function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut
             </button>
           </div>
         ) : (
-          <div style={{ background: T.primarySoft, borderRadius: 14, padding: 14, marginBottom: 16 }}>
+          <div style={{ background: T.primarySoft, borderRadius: 14, padding: 14, marginBottom: 14 }}>
             <div style={{ fontSize: 10.5, fontWeight: 700, color: T.primary, letterSpacing: 0.3, marginBottom: 10 }}>
               SCHEDULE FOR THIS DATE
             </div>
@@ -1410,107 +1545,179 @@ function DateSheet({ T, data, dateKeyStr, todayKey, onClose, onTimeIn, onTimeOut
           </div>
         )}
 
+        {/* Leave */}
+        <div style={{ marginBottom: 16 }}>
+          {leave ? (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                background: leave.type === "sick" ? T.sickSoft : T.vacationSoft,
+                borderRadius: 12,
+                padding: "10px 12px",
+              }}
+            >
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: leave.type === "sick" ? T.sick : T.vacation }}>
+                On {LEAVE_LABELS[leave.type].toLowerCase()}
+              </span>
+              <button
+                onClick={() => onSetLeave(null)}
+                style={{
+                  border: "none",
+                  background: "none",
+                  color: leave.type === "sick" ? T.sick : T.vacation,
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                onClick={() => onSetLeave("sick")}
+                style={{ flex: 1, padding: "9px 8px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.sick, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+              >
+                Mark sick leave
+              </button>
+              <button
+                onClick={() => onSetLeave("vacation")}
+                style={{ flex: 1, padding: "9px 8px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.vacation, fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}
+              >
+                Mark vacation leave
+              </button>
+            </div>
+          )}
+        </div>
+
         {isMissingTimeout && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.dangerSoft, color: T.danger, borderRadius: 12, padding: "10px 12px", fontSize: 12, fontWeight: 600, marginBottom: 14 }}>
             <AlertTriangle size={15} /> Missing time out for this day
           </div>
         )}
 
-        {!editMode ? (
-          <div style={{ display: "flex", justifyContent: "space-around", background: T.surfaceAlt, borderRadius: 16, padding: "16px 10px", marginBottom: 16 }}>
-            <Stat T={T} label="Time in" value={fmtClock(att.timeIn)} mono />
-            <Stat T={T} label="Time out" value={fmtClock(att.timeOut)} mono />
-            <Stat T={T} label="Worked" value={fmtDuration(att.workedMinutes)} />
-            <Stat T={T} label="Overtime" value={fmtDuration(att.overtimeMinutes)} color={att.overtimeMinutes > 0 ? T.warning : undefined} />
+        {noTimeTracking ? (
+          <div
+            style={{
+              textAlign: "center",
+              padding: "18px 10px",
+              background: T.surfaceAlt,
+              borderRadius: 16,
+              marginBottom: 16,
+              color: T.muted,
+              fontSize: 12.5,
+              fontWeight: 600,
+            }}
+          >
+            {isLeave
+              ? `No time tracking for this day — marked as ${LEAVE_LABELS[leave.type].toLowerCase()}.`
+              : "No time tracking for this day — it's a day off."}
           </div>
         ) : (
-          <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: 16, marginBottom: 16 }}>
-            <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: 10.5, fontWeight: 700, color: T.muted }}>TIME IN</label>
-                <input
-                  type="time"
-                  value={ti}
-                  onChange={(e) => setTi(e.target.value)}
-                  style={{ width: "100%", marginTop: 4, padding: "9px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.ink, fontFamily: MONO, fontSize: 13 }}
-                />
+          <>
+            {!editMode ? (
+              <div style={{ display: "flex", justifyContent: "space-around", background: T.surfaceAlt, borderRadius: 16, padding: "16px 10px", marginBottom: 16 }}>
+                <Stat T={T} label="Time in" value={fmtClock(att.timeIn)} mono />
+                <Stat T={T} label="Time out" value={fmtClock(att.timeOut)} mono />
+                <Stat T={T} label="Worked" value={fmtDuration(att.workedMinutes)} />
+                <Stat T={T} label="Overtime" value={fmtDuration(att.overtimeMinutes)} color={att.overtimeMinutes > 0 ? T.warning : undefined} />
               </div>
-              <div style={{ flex: 1 }}>
-                <label style={{ fontSize: 10.5, fontWeight: 700, color: T.muted }}>TIME OUT</label>
-                <input
-                  type="time"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                  style={{ width: "100%", marginTop: 4, padding: "9px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.ink, fontFamily: MONO, fontSize: 13 }}
-                />
+            ) : (
+              <div style={{ background: T.surfaceAlt, borderRadius: 16, padding: 16, marginBottom: 16 }}>
+                <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ fontSize: 10.5, fontWeight: 700, color: T.muted }}>TIME IN</label>
+                    <input
+                      type="time"
+                      value={ti}
+                      onChange={(e) => setTi(e.target.value)}
+                      style={{ width: "100%", marginTop: 4, padding: "9px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.ink, fontFamily: MONO, fontSize: 13 }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ fontSize: 10.5, fontWeight: 700, color: T.muted }}>TIME OUT</label>
+                    <input
+                      type="time"
+                      value={to}
+                      onChange={(e) => setTo(e.target.value)}
+                      style={{ width: "100%", marginTop: 4, padding: "9px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.ink, fontFamily: MONO, fontSize: 13 }}
+                    />
+                  </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.muted, marginBottom: 14 }}>
+                  <span>
+                    Worked: <strong style={{ color: T.ink }}>{fmtDuration(worked)}</strong>
+                  </span>
+                  <span>
+                    Overtime: <strong style={{ color: overtime > 0 ? T.warning : T.ink }}>{fmtDuration(overtime)}</strong>
+                  </span>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <BigButton
+                    bg={T.primary}
+                    fg="#fff"
+                    style={{ padding: "11px 14px", fontSize: 13, borderRadius: 12 }}
+                    onClick={() => {
+                      onManualEdit(ti || null, to || null);
+                      setEditMode(false);
+                    }}
+                  >
+                    Save
+                  </BigButton>
+                  <BigButton
+                    bg={T.surface}
+                    fg={T.ink}
+                    style={{ padding: "11px 14px", fontSize: 13, borderRadius: 12, border: `1px solid ${T.border}` }}
+                    onClick={() => {
+                      setTi(att.timeIn || "");
+                      setTo(att.timeOut || "");
+                      setEditMode(false);
+                    }}
+                  >
+                    Cancel
+                  </BigButton>
+                </div>
               </div>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.muted, marginBottom: 14 }}>
-              <span>
-                Worked: <strong style={{ color: T.ink }}>{fmtDuration(worked)}</strong>
-              </span>
-              <span>
-                Overtime: <strong style={{ color: overtime > 0 ? T.warning : T.ink }}>{fmtDuration(overtime)}</strong>
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <BigButton
-                bg={T.primary}
-                fg="#fff"
-                style={{ padding: "11px 14px", fontSize: 13, borderRadius: 12 }}
-                onClick={() => {
-                  onManualEdit(ti || null, to || null);
-                  setEditMode(false);
-                }}
-              >
-                Save
-              </BigButton>
-              <BigButton
-                bg={T.surface}
-                fg={T.ink}
-                style={{ padding: "11px 14px", fontSize: 13, borderRadius: 12, border: `1px solid ${T.border}` }}
-                onClick={() => {
-                  setTi(att.timeIn || "");
-                  setTo(att.timeOut || "");
-                  setEditMode(false);
-                }}
-              >
-                Cancel
-              </BigButton>
-            </div>
-          </div>
+            )}
+
+            {!editMode && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 10 }}>
+                {!att.timeIn && (
+                  <BigButton bg={T.primary} fg="#fff" onClick={onTimeIn}>
+                    Time in
+                  </BigButton>
+                )}
+                {att.timeIn && !att.timeOut && (
+                  <BigButton bg={T.warning} fg="#fff" onClick={onTimeOut}>
+                    {dateKeyStr === todayKey ? "Time out" : "Add time out"}
+                  </BigButton>
+                )}
+                {att.timeIn && att.timeOut && (
+                  <BigButton bg={T.surfaceAlt} fg={T.ink} style={{ border: `1px solid ${T.border}` }} onClick={() => setEditMode(true)}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                      <Pencil size={13} /> Edit record
+                    </span>
+                  </BigButton>
+                )}
+                {att.timeIn && !att.timeOut && dateKeyStr !== todayKey && (
+                  <button onClick={() => setEditMode(true)} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    Enter times manually
+                  </button>
+                )}
+              </div>
+            )}
+          </>
         )}
 
         {!editMode && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {!att.timeIn && (
-              <BigButton bg={T.primary} fg="#fff" onClick={onTimeIn}>
-                Time in
-              </BigButton>
-            )}
-            {att.timeIn && !att.timeOut && (
-              <BigButton bg={T.warning} fg="#fff" onClick={onTimeOut}>
-                {dateKeyStr === todayKey ? "Time out" : "Add time out"}
-              </BigButton>
-            )}
-            {att.timeIn && att.timeOut && (
-              <BigButton bg={T.surfaceAlt} fg={T.ink} style={{ border: `1px solid ${T.border}` }} onClick={() => setEditMode(true)}>
-                <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                  <Pencil size={13} /> Edit record
-                </span>
-              </BigButton>
-            )}
-            {att.timeIn && !att.timeOut && dateKeyStr !== todayKey && (
-              <button onClick={() => setEditMode(true)} style={{ background: "none", border: "none", color: T.primary, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                Enter times manually
-              </button>
-            )}
-            <BigButton bg="transparent" fg={T.primary} style={{ border: `1px solid ${T.border}` }} onClick={onOpenWorkLog}>
-              <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
-                <ClipboardList size={14} /> {hasLog ? "View work log" : "Work log"}
-              </span>
-            </BigButton>
-          </div>
+          <BigButton bg="transparent" fg={T.primary} style={{ border: `1px solid ${T.border}` }} onClick={onOpenWorkLog}>
+            <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+              <ClipboardList size={14} /> {hasLog ? "View work log" : "Work log"}
+            </span>
+          </BigButton>
         )}
       </div>
     </div>
@@ -1678,11 +1885,15 @@ function WorkLogModal({ T, data, dateKeyStr, onClose, onSave }) {
 /* SETTINGS TAB                                                             */
 /* ----------------------------------------------------------------------- */
 
-function SettingsTab({ T, data, onSave }) {
+function SettingsTab({ T, data, onSave, onImport }) {
   const [requiredHours, setRequiredHours] = useState(data.settings.requiredMinutes / 60);
   const [breakMinutes, setBreakMinutes] = useState(data.settings.breakMinutes);
   const [schedule, setSchedule] = useState(data.schedule);
   const [dirty, setDirty] = useState(false);
+
+  const fileInputRef = useRef(null);
+  const [pendingImport, setPendingImport] = useState(null);
+  const [importError, setImportError] = useState("");
 
   const dayOrder = [1, 2, 3, 4, 5, 6, 0]; // Monday-first
   const dayLabel = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -1695,6 +1906,45 @@ function SettingsTab({ T, data, onSave }) {
   const save = () => {
     onSave({ requiredMinutes: Math.round(requiredHours * 60), breakMinutes: Number(breakMinutes) }, schedule);
     setDirty(false);
+  };
+
+  const handleExport = () => {
+    const payload = JSON.stringify(data, null, 2);
+    const blob = new Blob([payload], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `punch-backup-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleFileSelected = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed || typeof parsed !== "object") throw new Error("invalid");
+        setPendingImport(parsed);
+        setImportError("");
+      } catch (err) {
+        setPendingImport(null);
+        setImportError("That file doesn't look like a valid Punch backup.");
+      }
+    };
+    reader.onerror = () => setImportError("Couldn't read that file — please try again.");
+    reader.readAsText(file);
+  };
+
+  const confirmImport = () => {
+    onImport(pendingImport);
+    setPendingImport(null);
   };
 
   return (
@@ -1777,13 +2027,64 @@ function SettingsTab({ T, data, onSave }) {
       </BigButton>
 
       <SectionLabel T={T} style={{ marginTop: 24 }}>
-        Privacy
+        Backup
       </SectionLabel>
+      <div style={{ display: "flex", gap: 8, marginBottom: pendingImport || importError ? 10 : 20 }}>
+        <BigButton bg={T.surfaceAlt} fg={T.ink} style={{ border: `1px solid ${T.border}`, padding: "12px 10px", fontSize: 13 }} onClick={handleExport}>
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <Download size={14} /> Export backup
+          </span>
+        </BigButton>
+        <BigButton
+          bg={T.surfaceAlt}
+          fg={T.ink}
+          style={{ border: `1px solid ${T.border}`, padding: "12px 10px", fontSize: 13 }}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <Upload size={14} /> Import backup
+          </span>
+        </BigButton>
+        <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={handleFileSelected} style={{ display: "none" }} />
+      </div>
+
+      {importError && (
+        <div style={{ fontSize: 12, color: T.danger, fontWeight: 600, marginBottom: 20 }}>{importError}</div>
+      )}
+
+      {pendingImport && (
+        <div style={{ background: T.dangerSoft, borderRadius: 14, padding: 14, marginBottom: 20 }}>
+          <div style={{ fontSize: 12, color: T.danger, fontWeight: 600, marginBottom: 10, lineHeight: 1.5 }}>
+            This will replace all current data on this device with the contents of the backup file. This
+            can't be undone.
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <BigButton
+              bg={T.danger}
+              fg="#fff"
+              style={{ padding: "9px 12px", fontSize: 12.5, borderRadius: 10 }}
+              onClick={confirmImport}
+            >
+              Replace data
+            </BigButton>
+            <BigButton
+              bg={T.surface}
+              fg={T.ink}
+              style={{ padding: "9px 12px", fontSize: 12.5, borderRadius: 10, border: `1px solid ${T.border}` }}
+              onClick={() => setPendingImport(null)}
+            >
+              Cancel
+            </BigButton>
+          </div>
+        </div>
+      )}
+
+      <SectionLabel T={T}>Privacy</SectionLabel>
       <div style={{ background: T.surfaceAlt, borderRadius: 14, padding: 14, fontSize: 12, color: T.muted, lineHeight: 1.5 }}>
         Your attendance records, schedule, and work logs are stored locally in this browser's
         on-device database. Nothing is sent to a server. Data survives closing the app, restarting
         your device, and reopening it later — but it's tied to this browser on this device, so it
-        won't show up if you open the app elsewhere unless you add sync or export yourself.
+        won't show up if you open the app elsewhere unless you use Export/Import backup above.
       </div>
     </div>
   );
