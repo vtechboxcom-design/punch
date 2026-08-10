@@ -554,7 +554,7 @@ export default function PunchApp() {
       {/* ---------------- HEADER ---------------- */}
       <div
         style={{
-          padding: "18px 20px 14px",
+          padding: "40px 20px 14px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
